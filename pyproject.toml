@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "openlibing-cli"
+version = "0.1.0"
+description = "Reverse-engineered resource-manager access from the command line."
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "MIT" }
+authors = [{ name = "openlibing-cli" }]
+dependencies = [
+    "requests>=2.25",
+    "urllib3>=1.26",
+]
+
+[project.scripts]
+openlibing = "openlibing_cli.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["openlibing_cli*"]
