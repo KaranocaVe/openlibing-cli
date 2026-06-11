@@ -83,6 +83,14 @@ def resolve_refresh_token(config):
     return config.get("refresh_token")
 
 
+def coerce_bool(value):
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+    return bool(value)
+
+
 def make_api(args, config):
     env = resolve_env(args, config)
     if env not in ENVIRONMENTS:
@@ -235,6 +243,31 @@ def wait_for_terminal(api, env_id, initial_status, args):
     return {"status": "timeout"}
 
 
+def resolve_attempts(args):
+    attempts = getattr(args, "attempts", None)
+    if attempts is not None:
+        return attempts
+    interval = getattr(args, "interval", 2.0) or 2.0
+    timeout = getattr(args, "timeout", 60.0) or 60.0
+    return max(1, int(timeout / interval))
+
+
+def poll_lifecycle_status(api, env_id, target_statuses, args):
+    if getattr(args, "no_wait", False):
+        return None, None
+    attempts = resolve_attempts(args)
+    try:
+        final_status = api.poll_status_until_target(
+            env_id,
+            target_statuses,
+            max_attempts=attempts,
+            interval_seconds=args.interval,
+        )
+        return final_status, None
+    except APIError as e:
+        return None, str(e)
+
+
 # ---------- subcommands ----------------------------------------------------
 
 
@@ -344,6 +377,36 @@ def cmd_status(args):
     print(json.dumps(data, indent=2, ensure_ascii=False))
 
 
+def cmd_get_status(args):
+    config = Config(args.config)
+    api = make_api(args, config)
+    env_id = resolve_env_id(args, config)
+    try:
+        data = api.get_status(env_id)
+    except APIError as e:
+        print(f"✗ {e}", file=sys.stderr)
+        raise SystemExit(1)
+    if args.json:
+        print(json.dumps(data, indent=2, ensure_ascii=False))
+        return
+    print(data.get("data"))
+
+
+def cmd_has_permission(args):
+    config = Config(args.config)
+    api = make_api(args, config)
+    try:
+        data = api.has_permission()
+    except APIError as e:
+        print(f"✗ {e}", file=sys.stderr)
+        raise SystemExit(1)
+    if args.json:
+        print(json.dumps(data, indent=2, ensure_ascii=False))
+        return
+    allowed = coerce_bool(data.get("data"))
+    print("true" if allowed else "false")
+
+
 def cmd_stop(args):
     config = Config(args.config)
     api = make_api(args, config)
@@ -353,7 +416,22 @@ def cmd_stop(args):
     except APIError as e:
         print(f"✗ {e}", file=sys.stderr)
         raise SystemExit(1)
-    print(f"✓ {data.get('msg', 'stopped')}")
+    final_status, poll_error = poll_lifecycle_status(api, env_id, ["disconnect", "ready"], args)
+    if args.json:
+        out = dict(data)
+        if final_status is not None:
+            out["finalStatus"] = final_status
+        if poll_error:
+            out["pollError"] = poll_error
+        print(json.dumps(out, indent=2, ensure_ascii=False))
+        return
+    if final_status is not None:
+        print(f"✓ {data.get('msg', 'stopped')} -> {final_status}")
+    elif poll_error:
+        print(f"✓ {data.get('msg', 'stopped')}")
+        print(f"  ! status polling not confirmed: {poll_error}", file=sys.stderr)
+    else:
+        print(f"✓ {data.get('msg', 'stopped')}")
 
 
 def cmd_delete(args):
@@ -370,7 +448,22 @@ def cmd_delete(args):
     except APIError as e:
         print(f"✗ {e}", file=sys.stderr)
         raise SystemExit(1)
-    print(f"✓ {data.get('msg', 'deleted')}")
+    final_status, poll_error = poll_lifecycle_status(api, env_id, ["deleted"], args)
+    if args.json:
+        out = dict(data)
+        if final_status is not None:
+            out["finalStatus"] = final_status
+        if poll_error:
+            out["pollError"] = poll_error
+        print(json.dumps(out, indent=2, ensure_ascii=False))
+        return
+    if final_status is not None:
+        print(f"✓ {data.get('msg', 'deleted')} -> {final_status}")
+    elif poll_error:
+        print(f"✓ {data.get('msg', 'deleted')}")
+        print(f"  ! status polling not confirmed: {poll_error}", file=sys.stderr)
+    else:
+        print(f"✓ {data.get('msg', 'deleted')}")
 
 
 def cmd_list(args):
@@ -566,16 +659,39 @@ def build_parser():
     sp.add_argument("--timeout", type=float, default=1800.0, help="Poll timeout seconds (default 1800)")
     sp.set_defaults(func=cmd_connect)
 
+    # start
+    sp = sub.add_parser("start", parents=[global_flags],
+                        help="Alias for connect")
+    sp.add_argument("env_id", nargs="?", help="Environment ID (envId from the deep link)")
+    sp.add_argument("--generate-key", action="store_true",
+                    help="Auto-generate ~/.ssh/id_rsa if missing")
+    sp.add_argument("--force-keygen", action="store_true",
+                    help="Re-generate the key pair (overwrites existing)")
+    sp.add_argument("--no-wait", action="store_true", help="Don't poll — return immediately")
+    sp.add_argument("--interval", type=float, default=5.0, help="Poll interval seconds (default 5)")
+    sp.add_argument("--timeout", type=float, default=1800.0, help="Poll timeout seconds (default 1800)")
+    sp.set_defaults(func=cmd_connect)
+
     # status
     sp = sub.add_parser("status", parents=[global_flags],
                         help="Check env status (no key upload side effect)")
     sp.add_argument("env_id", nargs="?", help="Environment ID")
     sp.set_defaults(func=cmd_status)
 
+    # get-status
+    sp = sub.add_parser("get-status", parents=[global_flags],
+                        help="Get raw lifecycle status used by stop/delete polling")
+    sp.add_argument("env_id", nargs="?", help="Environment ID")
+    sp.set_defaults(func=cmd_get_status)
+
     # stop
     sp = sub.add_parser("stop", parents=[global_flags],
                         help="Disconnect env")
     sp.add_argument("env_id", nargs="?", help="Environment ID")
+    sp.add_argument("--no-wait", action="store_true", help="Don't wait for disconnect/ready")
+    sp.add_argument("--interval", type=float, default=2.0, help="Poll interval seconds (default 2)")
+    sp.add_argument("--timeout", type=float, default=60.0, help="Poll timeout seconds (default 60)")
+    sp.add_argument("--attempts", type=int, help="Maximum status poll attempts")
     sp.set_defaults(func=cmd_stop)
 
     # delete
@@ -583,12 +699,21 @@ def build_parser():
                         help="Delete env")
     sp.add_argument("env_id", nargs="?", help="Environment ID")
     sp.add_argument("-y", "--yes", action="store_true", help="Skip confirmation")
+    sp.add_argument("--no-wait", action="store_true", help="Don't wait for deleted status")
+    sp.add_argument("--interval", type=float, default=2.0, help="Poll interval seconds (default 2)")
+    sp.add_argument("--timeout", type=float, default=60.0, help="Poll timeout seconds (default 60)")
+    sp.add_argument("--attempts", type=int, help="Maximum status poll attempts")
     sp.set_defaults(func=cmd_delete)
 
     # list
     sp = sub.add_parser("list", parents=[global_flags], aliases=["ls"],
                         help="List my environments")
     sp.set_defaults(func=cmd_list)
+
+    # has-permission
+    sp = sub.add_parser("has-permission", parents=[global_flags], aliases=["permission"],
+                        help="Check whether the current user can create environments")
+    sp.set_defaults(func=cmd_has_permission)
 
     # info
     sp = sub.add_parser("info", parents=[global_flags],

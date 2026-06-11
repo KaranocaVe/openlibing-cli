@@ -2,6 +2,7 @@
 
 import json
 import logging
+import time
 import urllib3
 import requests
 
@@ -16,6 +17,7 @@ from .constants import (
     API_LIST,
     API_REFRESH_TOKEN,
     API_ACCESS_TOKEN,
+    API_HAS_PERMISSION,
 )
 
 # Suppress the InsecureRequestWarning — the extension disables cert checks too.
@@ -177,8 +179,39 @@ class ResourceManagerAPI:
         log.info("GET %s", url)
         return self._check(self._request("GET", url))
 
+    def poll_status_until_target(self, dev_env_id, target_statuses, max_attempts=30, interval_seconds=2.0):
+        """Poll /localIde/getStatus until the backend reaches a target state.
+
+        Mirrors the plugin's pollStatusUntilTarget logic, including treating a
+        long-lived `disconnecting` state as effectively `disconnect`.
+        """
+        allow_disconnect_fallback = any(status in {"disconnect", "ready"} for status in target_statuses)
+        disconnecting_count = 0
+        max_disconnecting_attempts = 15
+        for _ in range(max_attempts):
+            data = self.get_status(dev_env_id)
+            current_status = data.get("data")
+            if current_status in target_statuses:
+                return current_status
+            if current_status == "disconnecting" and allow_disconnect_fallback:
+                disconnecting_count += 1
+                if disconnecting_count >= max_disconnecting_attempts:
+                    return "disconnect"
+            else:
+                disconnecting_count = 0
+            time.sleep(interval_seconds)
+        raise APIError(
+            f"Status polling timed out before reaching: {', '.join(target_statuses)}",
+            body={"devEnvId": dev_env_id, "target_statuses": target_statuses},
+        )
+
     def list_env(self):
         url = self._url(API_LIST)
+        log.info("GET %s", url)
+        return self._check(self._request("GET", url))
+
+    def has_permission(self):
+        url = self._url(API_HAS_PERMISSION)
         log.info("GET %s", url)
         return self._check(self._request("GET", url))
 
