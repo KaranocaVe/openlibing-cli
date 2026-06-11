@@ -125,10 +125,13 @@ ssh openlibing-env-1234567890
 | `openlibing login --uri <URI>` | Parse a `vscode://.../connect?...` URI, store ticket + user-id + env-id |
 | `openlibing login --ticket <T>` | Store a ticket directly |
 | `openlibing connect <envId> --generate-key` | Upload pub key, poll until running, print SSH info |
+| `openlibing start <envId>` | Alias for `connect`, mirroring the plugin's "start environment" action |
 | `openlibing status <envId>` | Check status without re-uploading the key |
-| `openlibing stop <envId>` | Disconnect the environment |
-| `openlibing delete <envId>` | Delete the environment |
+| `openlibing get-status <envId>` | Read raw lifecycle status from `/localIde/getStatus/{id}` |
+| `openlibing stop <envId>` | Disconnect the environment and wait for `disconnect` or `ready` unless `--no-wait` |
+| `openlibing delete <envId>` | Delete the environment and wait for `deleted` unless `--no-wait` |
 | `openlibing list` | List environments |
+| `openlibing has-permission` | Check whether the current user can create environments |
 | `openlibing info <envId>` | Print `user@host:port` |
 | `openlibing ssh-config <envId>` | Print an SSH config `Host` block |
 | `openlibing refresh` | Exchange `refreshToken` for a new `sessionId` |
