@@ -49,6 +49,10 @@ class Config:
         self._data[key] = value
         self.save()
 
+    def update(self, mapping):
+        self._data.update(mapping)
+        self.save()
+
     def unset(self, key):
         self._data.pop(key, None)
         self.save()

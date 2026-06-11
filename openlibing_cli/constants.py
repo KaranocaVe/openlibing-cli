@@ -5,6 +5,59 @@ values through environment variables in local use.
 """
 
 import os
+from pathlib import Path
+
+from .vscode_uri import populate_env_from_vscode_uri
+
+
+def _parse_dotenv_line(line):
+    line = line.strip()
+    if not line or line.startswith("#"):
+        return None
+    if line.startswith("export "):
+        line = line[7:].lstrip()
+    if "=" not in line:
+        return None
+    name, value = line.split("=", 1)
+    name = name.strip()
+    value = value.strip()
+    if not name:
+        return None
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+        value = value[1:-1]
+    return name, value
+
+
+def _dotenv_candidates():
+    seen = set()
+    roots = [Path.cwd().resolve(), Path(__file__).resolve().parent.parent]
+    for root in roots:
+        for parent in (root, *root.parents):
+            candidate = parent / ".env"
+            if candidate in seen:
+                continue
+            seen.add(candidate)
+            yield candidate
+
+
+def load_dotenv():
+    override = os.environ.get("OPENLIBING_DOTENV")
+    candidates = [Path(override).expanduser()] if override else _dotenv_candidates()
+    for candidate in candidates:
+        if not candidate.is_file():
+            continue
+        for raw_line in candidate.read_text(encoding="utf-8").splitlines():
+            parsed = _parse_dotenv_line(raw_line)
+            if not parsed:
+                continue
+            name, value = parsed
+            os.environ.setdefault(name, value)
+        return str(candidate)
+    return None
+
+
+load_dotenv()
+populate_env_from_vscode_uri()
 
 
 def _env(name, default):

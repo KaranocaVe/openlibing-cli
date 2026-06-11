@@ -9,13 +9,13 @@ import os
 import re
 import sys
 import time
-from urllib.parse import urlparse, parse_qs, unquote
 
 from . import __version__
 from .api import APIError, ResourceManagerAPI
 from .config import Config
 from .constants import ENVIRONMENTS
 from . import ssh_key
+from .vscode_uri import parse_vscode_uri
 
 
 # ---------- helpers --------------------------------------------------------
@@ -39,6 +39,7 @@ def resolve_session_id(args, config):
         "No session ticket. Provide one via:\n"
         "  --ticket <AUTH_TICKET>\n"
         "  OPENLIBING_SESSION_ID environment variable\n"
+        "  OPENLIBING_VSCODE_URI environment variable\n"
         "  or run: openlibing login --ticket <AUTH_TICKET>"
     )
 
@@ -49,42 +50,37 @@ def resolve_env(args, config):
             or config.get("env", "prod"))
 
 
+def resolve_env_id(args, config):
+    env_id = getattr(args, "env_id", None)
+    if env_id:
+        return env_id
+    env = os.environ.get("OPENLIBING_DEFAULT_ENV_ID")
+    if env:
+        return env
+    stored = config.get("default_env_id")
+    if stored:
+        return stored
+    raise SystemExit(
+        "No env id. Provide one via:\n"
+        "  <env_id> argument\n"
+        "  OPENLIBING_VSCODE_URI environment variable\n"
+        "  or run: openlibing login --uri <VSCODE_URI>"
+    )
+
+
+def resolve_user_id(config):
+    env = os.environ.get("OPENLIBING_USER_ID")
+    if env:
+        return env
+    return config.get("user_id")
+
+
 def make_api(args, config):
     env = resolve_env(args, config)
     if env not in ENVIRONMENTS:
         raise SystemExit(f"Unknown environment: {env}. Valid: {', '.join(ENVIRONMENTS)}")
     config.set("env", env)
     return ResourceManagerAPI(ENVIRONMENTS[env], resolve_session_id(args, config), env)
-
-
-def parse_vscode_uri(uri):
-    """Parse a `vscode://.../connect?...` deep link.
-
-    Tolerates URIs where the whole query string has been percent-encoded
-    (e.g. `?authTicket%3DABC%26userId%3DXYZ` — common when the URL is
-    captured from a redirected address bar).
-    """
-    parsed = urlparse(uri)
-    qs = parse_qs(parsed.query, keep_blank_values=True)
-    result = {
-        "authTicket": (qs.get("authTicket") or [None])[0],
-        "userId": (qs.get("userId") or [None])[0],
-        "envId": (qs.get("envId") or [None])[0],
-        "authType": (qs.get("authType") or [None])[0],
-    }
-    # If normal parsing yielded nothing, the query was probably
-    # double-encoded — try unquoting once and reparsing.
-    if not any(result.values()) and parsed.query:
-        decoded = unquote(parsed.query)
-        if decoded != parsed.query:
-            qs2 = parse_qs(decoded, keep_blank_values=True)
-            result = {
-                "authTicket": (qs2.get("authTicket") or [None])[0],
-                "userId": (qs2.get("userId") or [None])[0],
-                "envId": (qs2.get("envId") or [None])[0],
-                "authType": (qs2.get("authType") or [None])[0],
-            }
-    return result
 
 
 def normalize_machine_info(env_id, info):
@@ -193,27 +189,42 @@ def wait_for_terminal(api, env_id, initial_status, args):
 def cmd_login(args):
     config = Config(args.config)
     ticket = args.ticket
-    env_id = None
-    user_id = args.user_id
+    env_id = os.environ.get("OPENLIBING_DEFAULT_ENV_ID")
+    user_id = args.user_id or os.environ.get("OPENLIBING_USER_ID")
+    auth_type = os.environ.get("OPENLIBING_AUTH_TYPE")
 
-    if args.uri:
-        parsed = parse_vscode_uri(args.uri)
+    uri = args.uri or os.environ.get("OPENLIBING_VSCODE_URI")
+    if uri:
+        parsed = parse_vscode_uri(uri)
         if not ticket:
             ticket = parsed.get("authTicket")
         if parsed.get("envId"):
             env_id = parsed["envId"]
         if parsed.get("userId") and not user_id:
             user_id = parsed["userId"]
+        if parsed.get("authType"):
+            auth_type = parsed["authType"]
     if not ticket:
-        raise SystemExit("Must provide --ticket or --uri")
+        ticket = os.environ.get("OPENLIBING_SESSION_ID")
+    if not ticket:
+        raise SystemExit(
+            "No session ticket found. Provide one via:\n"
+            "  --ticket <AUTH_TICKET>\n"
+            "  --uri <VSCODE_URI>\n"
+            "  OPENLIBING_SESSION_ID environment variable\n"
+            "  OPENLIBING_VSCODE_URI environment variable"
+        )
 
-    config.set("session_id", ticket)
+    update = {"session_id": ticket}
     if user_id:
-        config.set("user_id", user_id)
+        update["user_id"] = user_id
     if env_id:
-        config.set("default_env_id", env_id)
+        update["default_env_id"] = env_id
+    if auth_type:
+        update["auth_type"] = auth_type
     if args.env:
-        config.set("env", args.env)
+        update["env"] = args.env
+    config.update(update)
 
     print(f"✓ Session saved to {config.path}")
     print(f"  env:    {config.get('env')}")
@@ -228,11 +239,12 @@ def cmd_connect(args):
     pub = ssh_key.ensure_public_key(
         auto_generate=args.generate_key, force=args.force_keygen
     )
+    env_id = resolve_env_id(args, config)
 
     if not args.json:
-        print(f"→ POST /localIde/connect env_id={args.env_id}")
+        print(f"→ POST /localIde/connect env_id={env_id}")
     try:
-        data = api.connect(args.env_id, pub)
+        data = api.connect(env_id, pub)
     except APIError as e:
         print(f"✗ connect failed: {e}", file=sys.stderr)
         raise SystemExit(1)
@@ -241,12 +253,12 @@ def cmd_connect(args):
     if not args.no_wait and not args.json:
         print(f"→ polling (interval={args.interval}s, timeout={args.timeout}s)")
 
-    final = wait_for_terminal(api, args.env_id, info.get("status"), args)
+    final = wait_for_terminal(api, env_id, info.get("status"), args)
     # Merge the polled final into info (running-state usually has the
     # up-to-date ip/port).
     info.update({k: v for k, v in final.items() if v})
 
-    out = normalize_machine_info(args.env_id, info)
+    out = normalize_machine_info(env_id, info)
     out["publicKeyFingerprint"] = pub.split()[-1] if pub else None
 
     if args.json:
@@ -259,8 +271,9 @@ def cmd_connect(args):
 def cmd_status(args):
     config = Config(args.config)
     api = make_api(args, config)
+    env_id = resolve_env_id(args, config)
     try:
-        data = api.check_status(args.env_id)
+        data = api.check_status(env_id)
     except APIError as e:
         print(f"✗ {e}", file=sys.stderr)
         raise SystemExit(1)
@@ -270,8 +283,9 @@ def cmd_status(args):
 def cmd_stop(args):
     config = Config(args.config)
     api = make_api(args, config)
+    env_id = resolve_env_id(args, config)
     try:
-        data = api.stop(args.env_id)
+        data = api.stop(env_id)
     except APIError as e:
         print(f"✗ {e}", file=sys.stderr)
         raise SystemExit(1)
@@ -279,15 +293,16 @@ def cmd_stop(args):
 
 
 def cmd_delete(args):
+    config = Config(args.config)
+    env_id = resolve_env_id(args, config)
     if not args.yes:
-        ans = input(f"Delete env {args.env_id}? [y/N] ")
+        ans = input(f"Delete env {env_id}? [y/N] ")
         if ans.lower() != "y":
             print("cancelled")
             return
-    config = Config(args.config)
     api = make_api(args, config)
     try:
-        data = api.delete(args.env_id)
+        data = api.delete(env_id)
     except APIError as e:
         print(f"✗ {e}", file=sys.stderr)
         raise SystemExit(1)
@@ -321,12 +336,13 @@ def cmd_info(args):
     """Just print user@host:port for piping into another command."""
     config = Config(args.config)
     api = make_api(args, config)
+    env_id = resolve_env_id(args, config)
     try:
-        data = api.check_status(args.env_id)
+        data = api.check_status(env_id)
     except APIError as e:
         print(f"✗ {e}", file=sys.stderr)
         raise SystemExit(1)
-    out = normalize_machine_info(args.env_id, data.get("data") or {})
+    out = normalize_machine_info(env_id, data.get("data") or {})
     host = out["host"]
     port = out["port"]
     user = out["user"]
@@ -339,12 +355,13 @@ def cmd_ssh_config(args):
     """Print an ~/.ssh/config Host block for the env."""
     config = Config(args.config)
     api = make_api(args, config)
+    env_id = resolve_env_id(args, config)
     try:
-        data = api.check_status(args.env_id)
+        data = api.check_status(env_id)
     except APIError as e:
         print(f"✗ {e}", file=sys.stderr)
         raise SystemExit(1)
-    out = normalize_machine_info(args.env_id, data.get("data") or {})
+    out = normalize_machine_info(env_id, data.get("data") or {})
     alias = re.sub(r"[^a-zA-Z0-9._-]", "-", f"openlibing-{out['devEnvId']}")
     key_file = out["identityFile"]
     if out["useProxy"] and out.get("targetIp"):
@@ -406,10 +423,15 @@ def cmd_keygen(args):
 def cmd_whoami(args):
     config = Config(args.config)
     sid = resolve_session_id(args, config)
+    env_id = None
+    try:
+        env_id = resolve_env_id(args, config)
+    except SystemExit:
+        env_id = config.get("default_env_id") or "(unset)"
     print(f"env:        {resolve_env(args, config)}")
     print(f"baseURL:    {ENVIRONMENTS.get(resolve_env(args, config))}")
-    print(f"user-id:    {config.get('user_id') or '(unset)'}")
-    print(f"env-id:     {config.get('default_env_id') or '(unset)'}")
+    print(f"user-id:    {resolve_user_id(config) or '(unset)'}")
+    print(f"env-id:     {env_id}")
     print(f"session:    {sid[:8]}…{sid[-6:]}  ({len(sid)} chars)")
     print(f"config:     {config.path}")
 
@@ -449,7 +471,7 @@ def build_parser():
     # connect
     sp = sub.add_parser("connect", parents=[global_flags],
                         help="Upload pub key + poll until running, print SSH info")
-    sp.add_argument("env_id", help="Environment ID (envId from the deep link)")
+    sp.add_argument("env_id", nargs="?", help="Environment ID (envId from the deep link)")
     sp.add_argument("--generate-key", action="store_true",
                     help="Auto-generate ~/.ssh/id_rsa if missing")
     sp.add_argument("--force-keygen", action="store_true",
@@ -462,19 +484,19 @@ def build_parser():
     # status
     sp = sub.add_parser("status", parents=[global_flags],
                         help="Check env status (no key upload side effect)")
-    sp.add_argument("env_id", help="Environment ID")
+    sp.add_argument("env_id", nargs="?", help="Environment ID")
     sp.set_defaults(func=cmd_status)
 
     # stop
     sp = sub.add_parser("stop", parents=[global_flags],
                         help="Disconnect env")
-    sp.add_argument("env_id", help="Environment ID")
+    sp.add_argument("env_id", nargs="?", help="Environment ID")
     sp.set_defaults(func=cmd_stop)
 
     # delete
     sp = sub.add_parser("delete", parents=[global_flags],
                         help="Delete env")
-    sp.add_argument("env_id", help="Environment ID")
+    sp.add_argument("env_id", nargs="?", help="Environment ID")
     sp.add_argument("-y", "--yes", action="store_true", help="Skip confirmation")
     sp.set_defaults(func=cmd_delete)
 
@@ -486,13 +508,13 @@ def build_parser():
     # info
     sp = sub.add_parser("info", parents=[global_flags],
                         help="Print just user@host:port (good for piping)")
-    sp.add_argument("env_id", help="Environment ID")
+    sp.add_argument("env_id", nargs="?", help="Environment ID")
     sp.set_defaults(func=cmd_info)
 
     # ssh-config
     sp = sub.add_parser("ssh-config", parents=[global_flags],
                         help="Print an SSH config Host block")
-    sp.add_argument("env_id", help="Environment ID")
+    sp.add_argument("env_id", nargs="?", help="Environment ID")
     sp.set_defaults(func=cmd_ssh_config)
 
     # refresh — exchange refresh token for new session id

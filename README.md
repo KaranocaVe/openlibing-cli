@@ -52,6 +52,14 @@ export OPENLIBING_REFERER_ALPHA="https://portal-alpha.internal.example/"
 export OPENLIBING_REFERER_ALPHA_YELLOW="https://portal-alpha-yellow.internal.example/"
 ```
 
+You can keep just the deep link in `.env`; the CLI will derive
+`OPENLIBING_SESSION_ID`, `OPENLIBING_DEFAULT_ENV_ID`, and
+`OPENLIBING_USER_ID` automatically from `OPENLIBING_VSCODE_URI`.
+
+```bash
+OPENLIBING_VSCODE_URI="vscode://vendor.resource-manager/connect?authTicket%3DSESSION_TOKEN_EXAMPLE%26userId%3Duser_example%26envId%3Denv-1234567890%26authType%3Dresource-manager"
+```
+
 ## Quick start
 
 ### 1. Capture the deep link
@@ -74,7 +82,7 @@ openlibing login --uri "vscode://vendor.resource-manager/connect?authTicket=SESS
 openlibing login --ticket SESSION_TOKEN_EXAMPLE --user-id user_example
 ```
 
-The ticket is stored in `~/.config/openlibing-cli/config.json` with mode `0600`. You can also pass it inline with `--ticket`, or via `OPENLIBING_SESSION_ID`.
+The ticket is stored in `~/.config/openlibing-cli/config.json` with mode `0600`. You can also pass it inline with `--ticket`, via `OPENLIBING_SESSION_ID`, or indirectly via `OPENLIBING_VSCODE_URI`.
 
 ### 3. Connect and print SSH info
 
